@@ -21,7 +21,7 @@ source /workspace/xtts_env/bin/activate
 
 pip install --upgrade pip
 pip install numpy==1.22.0 scipy==1.11.2
-pip install torch==2.1.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.1.0+cu121 torchvision==0.16.0+cu121 --index-url https://download.pytorch.org/whl/cu121
 pip install transformers==4.37.2
 pip install TTS==0.22.0 fastapi uvicorn soundfile pydantic
 
@@ -52,6 +52,7 @@ def tts_endpoint(req: Req):
         speaker = "voice.wav"
 
     wav = tts.tts(text=req.text, speaker_wav=speaker, language=req.language)
+
     buf = io.BytesIO()
     sf.write(buf, wav, 24000, format="WAV")
     audio_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -76,7 +77,8 @@ deactivate
 ###############################################
 # DOWNLOAD MISTRAL
 ###############################################
-HF_TOKEN="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"
+HF_TOKEN="TON_HF_TOKEN_ICI"
+
 cd /workspace/models/mistral
 
 for f in config.json generation_config.json special_tokens_map.json tokenizer.json tokenizer.model model.safetensors.index.json model-00001-of-00003.safetensors model-00002-of-00003.safetensors model-00003-of-00003.safetensors; do
@@ -86,7 +88,7 @@ for f in config.json generation_config.json special_tokens_map.json tokenizer.js
 done
 
 ###############################################
-# PROMETHEUS + NODE EXPORTER
+# PROMETHEUS + NODE EXPORTER (CPU/RAM)
 ###############################################
 cd /workspace/monitoring
 
@@ -98,9 +100,20 @@ wget https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_e
 tar -xzf node_exporter-1.7.0.linux-amd64.tar.gz
 mv node_exporter-1.7.0.linux-amd64 node_exporter
 
+cat << 'EOF' > /workspace/monitoring/prometheus/prometheus.yml
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:9100']
+EOF
+
 ###############################################
 # GRAFANA
 ###############################################
+cd /workspace/monitoring
 wget https://dl.grafana.com/oss/release/grafana-11.0.0.linux-amd64.tar.gz
 tar -xzf grafana-11.0.0.linux-amd64.tar.gz
 mv grafana-11.0.0 grafana
@@ -114,32 +127,45 @@ command=/workspace/xtts_env/bin/uvicorn server_xtts:app --host 0.0.0.0 --port 78
 directory=/workspace
 autostart=true
 autorestart=true
+stdout_logfile=/workspace/logs/xtts.log
+stderr_logfile=/workspace/logs/xtts.err
 
 [program:vllm]
 command=/workspace/llm_env/bin/python3 -m vllm.entrypoints.openai.api_server --model /workspace/models/mistral --port 8000 --host 0.0.0.0 --tensor-parallel-size auto --gpu-memory-utilization 0.95
 directory=/workspace
 autostart=true
 autorestart=true
+stdout_logfile=/workspace/logs/vllm.log
+stderr_logfile=/workspace/logs/vllm.err
 
 [program:prometheus]
 command=/workspace/monitoring/prometheus/prometheus --config.file=/workspace/monitoring/prometheus/prometheus.yml --web.listen-address=:9090
+directory=/workspace/monitoring/prometheus
 autostart=true
 autorestart=true
+stdout_logfile=/workspace/logs/prometheus.log
+stderr_logfile=/workspace/logs/prometheus.err
 
 [program:node_exporter]
 command=/workspace/monitoring/node_exporter/node_exporter --web.listen-address=:9100
+directory=/workspace/monitoring/node_exporter
 autostart=true
 autorestart=true
+stdout_logfile=/workspace/logs/node_exporter.log
+stderr_logfile=/workspace/logs/node_exporter.err
 
 [program:grafana]
-command=/workspace/monitoring/grafana/bin/grafana-server --homepath=/workspace/monitoring/grafana
+command=/workspace/monitoring/grafana/bin/grafana-server --homepath=/workspace/monitoring/grafana --http-port=3000
+directory=/workspace/monitoring/grafana
 autostart=true
 autorestart=true
+stdout_logfile=/workspace/logs/grafana.log
+stderr_logfile=/workspace/logs/grafana.err
 EOF
 
-supervisorctl reread
-supervisorctl update
-supervisorctl start all
+supervisorctl reread || true
+supervisorctl update || true
+supervisorctl start all || true
 
 echo "==============================================="
 echo " INSTALLATION COMPLETE "
