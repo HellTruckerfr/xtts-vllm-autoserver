@@ -1,102 +1,73 @@
 #!/bin/bash
-# set -e retiré volontairement : on veut que les erreurs non-fatales
-# (supervisorctl au boot, etc.) ne coupent pas tout le script.
+# Script d'installation pour vast.ai
+# Lance Qwen3-TTS (port 7860) + vLLM/Mistral (port 8000)
+# Compatible avec Alexandria en mode TTS externe
 
-echo "==============================================="
-echo " XTTS + vLLM + Grafana + Prometheus Installer "
-echo "==============================================="
+echo "================================================"
+echo "  Qwen3-TTS + vLLM — Serveurs externes Alexandria"
+echo "================================================"
 
-# ── Dépendances système ─────────────────────────────────────────
-# L'image nvidia/cuda:12.1.1-runtime-ubuntu22.04 est minimale :
-# python3.10 n'est pas forcément présent, on ajoute le PPA.
-apt-get update -y
-apt-get install -y software-properties-common
-add-apt-repository -y ppa:deadsnakes/ppa
+# ── Dépendances système ──────────────────────────────────────
 apt-get update -y
 apt-get install -y \
-    python3.10 python3.10-venv python3-pip \
-    wget git curl supervisor
+    python3-pip python3-venv python3.10-venv \
+    git wget curl supervisor ffmpeg \
+    software-properties-common
 
-mkdir -p /workspace/models/mistral
 mkdir -p /workspace/logs
-mkdir -p /workspace/monitoring
-cd /workspace
 
-###############################################
-# XTTS ENV
-###############################################
-python3.10 -m venv /workspace/xtts_env
-source /workspace/xtts_env/bin/activate
+# ════════════════════════════════════════════════════════════
+# 1. QWEN3-TTS (Gradio — port 7860)
+#    Utilise SUP3RMASS1VE/Qwen3-TTS, le serveur Gradio
+#    qu'Alexandria attend en mode "external"
+# ════════════════════════════════════════════════════════════
+echo ""
+echo ">>> Installation de Qwen3-TTS..."
+
+cd /workspace
+git clone https://github.com/SUP3RMASS1VE/Qwen3-TTS.git
+cd /workspace/Qwen3-TTS
+
+python3 -m venv /workspace/tts_env
+source /workspace/tts_env/bin/activate
 
 pip install --upgrade pip
-pip install numpy==1.22.0 scipy==1.11.2
-pip install torch==2.1.0+cu121 torchvision==0.16.0+cu121 \
+
+# PyTorch CUDA 12.1
+pip install torch==2.1.0+cu121 torchvision==0.16.0+cu121 torchaudio==2.1.0+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
-pip install transformers==4.37.2
-pip install TTS==0.22.0 fastapi uvicorn soundfile pydantic
 
-# Licence Coqui
-echo "I have purchased a commercial license from Coqui: licensing@coqui.ai" \
-    > ~/.coqui_license
-echo "Otherwise, I agree to the terms of the non-commercial CPML: https://coqui.ai/cpml" \
-    >> ~/.coqui_license
-
-cat << 'PYEOF' > /workspace/server_xtts.py
-from fastapi import FastAPI
-from pydantic import BaseModel
-from TTS.api import TTS
-import base64, io, soundfile as sf
-
-app = FastAPI()
-tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
-
-class Req(BaseModel):
-    text: str
-    speaker_wav: str | None = None
-    language: str = "fr"
-
-@app.post("/tts")
-def tts_endpoint(req: Req):
-    speaker = None
-    if req.speaker_wav:
-        wav_bytes = base64.b64decode(req.speaker_wav)
-        with open("voice.wav", "wb") as f:
-            f.write(wav_bytes)
-        speaker = "voice.wav"
-
-    wav = tts.tts(text=req.text, speaker_wav=speaker, language=req.language)
-
-    buf = io.BytesIO()
-    sf.write(buf, wav, 24000, format="WAV")
-    audio_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return {"audio": audio_b64}
-PYEOF
+# Dépendances Qwen3-TTS
+pip install -r /workspace/Qwen3-TTS/requirements.txt
 
 deactivate
 
-###############################################
-# vLLM ENV
-###############################################
-python3.10 -m venv /workspace/llm_env
+# ════════════════════════════════════════════════════════════
+# 2. vLLM + Mistral (OpenAI-compatible — port 8000)
+# ════════════════════════════════════════════════════════════
+echo ""
+echo ">>> Installation de vLLM..."
+
+python3 -m venv /workspace/llm_env
 source /workspace/llm_env/bin/activate
 
 pip install --upgrade pip
 pip install numpy==1.26.4
 pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
-pip install vllm==0.4.2 transformers==4.40.2 lm-format-enforcer==0.9.8
+pip install vllm==0.4.2 transformers==4.40.2
 
 deactivate
 
-###############################################
-# DOWNLOAD MISTRAL
-# HF_TOKEN est injecté par vast.ai via les Environment Variables
-###############################################
+# ── Téléchargement de Mistral ──────────────────────────────
 if [ -z "$HF_TOKEN" ]; then
-    echo "⚠️  ATTENTION : HF_TOKEN non défini, téléchargement de Mistral ignoré."
-    echo "   Ajoute HF_TOKEN dans les Environment Variables du template vast.ai."
+    echo "WARNING: HF_TOKEN non defini - telechargement Mistral ignore."
+    echo "Ajoute HF_TOKEN dans les Environment Variables vast.ai."
 else
-    echo "Téléchargement de Mistral-7B-Instruct-v0.3..."
+    echo ""
+    echo ">>> Telechargement de Mistral-7B-Instruct-v0.3..."
+    mkdir -p /workspace/models/mistral
     cd /workspace/models/mistral
+
     for f in \
         config.json \
         generation_config.json \
@@ -108,115 +79,61 @@ else
         model-00002-of-00003.safetensors \
         model-00003-of-00003.safetensors
     do
-        wget -q \
+        wget -q --show-progress \
             --header="Authorization: Bearer $HF_TOKEN" \
             "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/$f" \
             -O "$f" \
-            && echo "  ✓ $f" \
-            || echo "  ✗ Échec : $f"
+            && echo "  OK $f" || echo "  FAIL $f"
     done
-    cd /workspace
 fi
 
-###############################################
-# PROMETHEUS + NODE EXPORTER
-###############################################
-cd /workspace/monitoring
+# ════════════════════════════════════════════════════════════
+# 3. SUPERVISOR — lance les deux services au démarrage
+# ════════════════════════════════════════════════════════════
+echo ""
+echo ">>> Configuration de supervisor..."
 
-wget -q https://github.com/prometheus/prometheus/releases/download/v2.51.0/prometheus-2.51.0.linux-amd64.tar.gz
-tar -xzf prometheus-2.51.0.linux-amd64.tar.gz
-mv prometheus-2.51.0.linux-amd64 prometheus
+cat > /etc/supervisor/conf.d/alexandria-stack.conf << 'SUPEOF'
 
-wget -q https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz
-tar -xzf node_exporter-1.7.0.linux-amd64.tar.gz
-mv node_exporter-1.7.0.linux-amd64 node_exporter
-
-cat << 'PROMEOF' > /workspace/monitoring/prometheus/prometheus.yml
-global:
-  scrape_interval: 5s
-
-scrape_configs:
-  - job_name: 'node'
-    static_configs:
-      - targets: ['localhost:9100']
-PROMEOF
-
-###############################################
-# GRAFANA
-###############################################
-cd /workspace/monitoring
-wget -q https://dl.grafana.com/oss/release/grafana-11.0.0.linux-amd64.tar.gz
-tar -xzf grafana-11.0.0.linux-amd64.tar.gz
-mv grafana-11.0.0 grafana
-
-###############################################
-# SUPERVISOR CONFIG
-###############################################
-cat << 'SUPEOF' > /etc/supervisor/conf.d/stack.conf
-[program:xtts]
-command=/workspace/xtts_env/bin/uvicorn server_xtts:app --host 0.0.0.0 --port 7860
-directory=/workspace
+[program:qwen3-tts]
+command=/workspace/tts_env/bin/python3 app.py --ip 0.0.0.0 --port 7860
+directory=/workspace/Qwen3-TTS
 autostart=true
 autorestart=true
-stdout_logfile=/workspace/logs/xtts.log
-stderr_logfile=/workspace/logs/xtts.err
+startsecs=15
+stdout_logfile=/workspace/logs/qwen3-tts.log
+stderr_logfile=/workspace/logs/qwen3-tts.err
+environment=CUDA_VISIBLE_DEVICES="0"
 
 [program:vllm]
-command=/workspace/llm_env/bin/python3 -m vllm.entrypoints.openai.api_server \
-    --model /workspace/models/mistral \
-    --port 8000 \
-    --host 0.0.0.0 \
-    --tensor-parallel-size 1 \
-    --gpu-memory-utilization 0.95
+command=/workspace/llm_env/bin/python3 -m vllm.entrypoints.openai.api_server --model /workspace/models/mistral --port 8000 --host 0.0.0.0 --tensor-parallel-size 1 --gpu-memory-utilization 0.85
 directory=/workspace
 autostart=true
 autorestart=true
+startsecs=30
 stdout_logfile=/workspace/logs/vllm.log
 stderr_logfile=/workspace/logs/vllm.err
+environment=CUDA_VISIBLE_DEVICES="0"
 
-[program:prometheus]
-command=/workspace/monitoring/prometheus/prometheus \
-    --config.file=/workspace/monitoring/prometheus/prometheus.yml \
-    --web.listen-address=:9090
-directory=/workspace/monitoring/prometheus
-autostart=true
-autorestart=true
-stdout_logfile=/workspace/logs/prometheus.log
-stderr_logfile=/workspace/logs/prometheus.err
-
-[program:node_exporter]
-command=/workspace/monitoring/node_exporter/node_exporter --web.listen-address=:9100
-directory=/workspace/monitoring/node_exporter
-autostart=true
-autorestart=true
-stdout_logfile=/workspace/logs/node_exporter.log
-stderr_logfile=/workspace/logs/node_exporter.err
-
-[program:grafana]
-command=/workspace/monitoring/grafana/bin/grafana-server \
-    --homepath=/workspace/monitoring/grafana \
-    --http-port=3000
-directory=/workspace/monitoring/grafana
-autostart=true
-autorestart=true
-stdout_logfile=/workspace/logs/grafana.log
-stderr_logfile=/workspace/logs/grafana.err
 SUPEOF
 
-# Lance supervisord (daemon complet) puis recharge la config
-# On utilise supervisord directement plutôt que supervisorctl
-# car le service peut ne pas encore tourner au moment du on-start script.
+# Lance supervisord puis recharge
 supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
-sleep 2
+sleep 3
 supervisorctl reread  2>/dev/null || true
 supervisorctl update  2>/dev/null || true
 supervisorctl start all 2>/dev/null || true
 
-echo "==============================================="
-echo " INSTALLATION COMPLETE"
-echo " XTTS      → http://<IP>:7860"
-echo " vLLM      → http://<IP>:8000/v1"
-echo " Grafana   → http://<IP>:3000"
-echo " Prometheus→ http://<IP>:9090"
-echo " NodeExp   → http://<IP>:9100/metrics"
-echo "==============================================="
+echo ""
+echo "================================================"
+echo "  INSTALLATION TERMINEE"
+echo ""
+echo "  Dans Alexandria (Setup) :"
+echo "  TTS Mode     -> external"
+echo "  TTS URL      -> http://<vast-ip>:<port-ext-7860>"
+echo "  LLM Base URL -> http://<vast-ip>:<port-ext-8000>/v1"
+echo "  LLM API Key  -> local"
+echo "  LLM Model    -> mistralai/Mistral-7B-Instruct-v0.3"
+echo ""
+echo "  Logs : /workspace/logs/"
+echo "================================================"
