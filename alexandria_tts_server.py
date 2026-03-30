@@ -50,7 +50,7 @@ def _add_silence(wav, sr, ms=300):
     silence = np.zeros(int(sr * ms / 1000), dtype=wav.dtype)
     return np.concatenate([wav, silence])
 
-def _trim_start(wav, sr, ms=80):
+def _trim_start(wav, sr, ms=120):
     """Coupe les premieres ms du WAV pour supprimer l artefact de demarrage du clone."""
     cut = int(sr * ms / 1000)
     return wav[cut:] if len(wav) > cut * 2 else wav
