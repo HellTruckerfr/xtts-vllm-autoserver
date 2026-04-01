@@ -37,7 +37,7 @@ VOICE_MAP = {
     "Ono_anna": "Ono_anna", "Ryan": "Ryan", "Serena": "Serena",
     "Sohee": "Sohee", "Uncle_fu": "Uncle_fu", "Vivian": "Vivian",
 }
-LORA_VOICES = ["narrator_fr", "narrator_fr_v2", "feminine_fr"]
+LORA_VOICES = ["narrator_fr", "narrator_fr_v2", "narrator_fr_v3", "feminine_fr"]
 
 def _pad_text(text):
     text = text.strip()
@@ -50,7 +50,7 @@ def _add_silence(wav, sr, ms=300):
     silence = np.zeros(int(sr * ms / 1000), dtype=wav.dtype)
     return np.concatenate([wav, silence])
 
-def _trim_start(wav, sr, ms=120):
+def _trim_start(wav, sr, ms=300):
     """Coupe les premieres ms du WAV pour supprimer l artefact de demarrage du clone."""
     cut = int(sr * ms / 1000)
     return wav[cut:] if len(wav) > cut * 2 else wav
@@ -148,7 +148,7 @@ def generate_clone_voice(ref_audio, ref_text: str, text: str, language: str):
             prompt = _clone_prompt_cache[cached_key]
             wavs, sr = model.generate_voice_clone(
                 text=text_padded, voice_clone_prompt=prompt,
-                non_streaming_mode=True, language=lang
+                non_streaming_mode=True, language=lang, do_sample=True, temperature=1.2, top_p=0.95, top_k=50, repetition_penalty=1.1
             )
         else:
             # Fallback: calcul a la volee et mise en cache par ref_path
@@ -164,7 +164,7 @@ def generate_clone_voice(ref_audio, ref_text: str, text: str, language: str):
             prompt = _clone_prompt_cache[ref_path]
             wavs, sr = model.generate_voice_clone(
                 text=text_padded, voice_clone_prompt=prompt,
-                non_streaming_mode=True, language=lang
+                non_streaming_mode=True, language=lang, do_sample=True, temperature=1.2, top_p=0.95, top_k=50, repetition_penalty=1.1
             )
 
         wav = np.concatenate(wavs) if isinstance(wavs, list) else wavs
@@ -214,7 +214,7 @@ def generate_batch_clone(texts_json: str, lora_name: str, language: str):
 
         wavs_list, sr = model.generate_voice_clone(
             text=texts_padded, voice_clone_prompt=prompt,
-            non_streaming_mode=True, language=lang,
+            non_streaming_mode=True, language=lang, do_sample=True, temperature=1.2, top_p=0.95, top_k=50, repetition_penalty=1.1,
         )
 
         torch.cuda.empty_cache()
@@ -262,7 +262,7 @@ def build_app():
             btn0.click(generate_custom_voice, inputs=[txt0, lang0, spk0, ins0, mdl0, sed0], outputs=[out0, err0], api_name="generate_custom_voice")
         with gr.Tab("Batch Clone"):
             btexts = gr.Textbox(label="texts_json")
-            blora  = gr.Textbox(label="lora_name", value="narrator_fr_v2")
+            blora  = gr.Textbox(label="lora_name", value="narrator_fr_v3")
             blang  = gr.Dropdown(["Auto","English","French","Chinese"], value="Auto", label="language")
             bbtn   = gr.Button("Batch Clone")
             bout   = gr.File(label="Output JSON", type="filepath")
